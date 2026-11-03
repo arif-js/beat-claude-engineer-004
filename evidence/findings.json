@@ -1,0 +1,172 @@
+{
+  "file": "upstream/challenges/engineer-004/fixtures/event_sample.jsonl",
+  "sha256": "1aeb24b415009e89fcf8acb5a178410faf216dc17b16920d9849ecc8bbb24235",
+  "lines": 25,
+  "parsed": 24,
+  "unparseable": 1,
+  "findings": [
+    {
+      "cls": "clock_skew_future_ts:year_scale",
+      "severity": "critical",
+      "ids": [
+        "evt-0016"
+      ],
+      "lines": [
+        17
+      ],
+      "detail": "received_at - ts = -31535999.788s; client clock ahead by 31,535,999.788s (non-integer; 0.212s from a whole minute)",
+      "disposition": "partition and retain on received_at; clamp ts into the retention window and keep the raw value in a side field",
+      "why": "The same person's evt-0024 carries a correct ts, so the device clock is fine: this is a date bug in the code path that built this event (a year field), not an unset system clock. This is the most dangerous of the clock cases and the reason partitioning on client ts is unsafe: the record lands in a partition far outside the retention window, where a 90-day lifecycle rule and a deletion sweep scoped to recent partitions will both walk straight past it. That turns a clock bug into an undeletable record, which is a compliance problem rather than a data-quality one."
+    },
+    {
+      "cls": "pii_in_properties",
+      "severity": "critical",
+      "ids": [
+        "evt-0007"
+      ],
+      "lines": [
+        8
+      ],
+      "detail": "evt-0007 [t-042]: ['contact_email', 'phone']",
+      "disposition": "tokenize or hash at the edge; keep raw PII out of the analytics store and out of warehouse exports",
+      "why": "A customer put direct identifiers in an arbitrary properties blob, which the SDK lets them do. Once PII is in a free-form field it is in the data lake, the Parquet files and every warehouse export, and an Article 17 deletion can no longer be satisfied by deleting rows keyed on user_id. Key-name matching finds this one; it will not find PII in a field called `notes`, which is why this needs a schema contract, not only a detector."
+    },
+    {
+      "cls": "privacy_request_in_stream",
+      "severity": "critical",
+      "ids": [
+        "evt-0017"
+      ],
+      "lines": [
+        18
+      ],
+      "detail": "GDPR delete_all_data for u-1077 [t-088]; identity scope ['anon:anon-77a', 'user:u-1077']; events a user_id-scoped delete would miss: ['evt-0006']",
+      "disposition": "route to the compliance control plane for human verification; never execute from a stream consumer",
+      "why": "Two separate traps. First, a delete that resolves only user_id misses this device's pre-identify events, which carry a null user_id and are still that person's data -- so deletion has to walk the identity graph, which means the anonymous-to-user mapping must itself survive until the delete completes. Second, an erasure that an unauthenticated SDK can trigger is an abuse vector: a forged beacon would wipe a real customer's records."
+    },
+    {
+      "cls": "clock_skew_future_ts:device_drift",
+      "severity": "high",
+      "ids": [
+        "evt-0005"
+      ],
+      "lines": [
+        6
+      ],
+      "detail": "received_at - ts = -47.190s; client clock ahead by 47.190s (non-integer; 12.810s from a whole minute)",
+      "disposition": "keep ts as reported, order on received_at",
+      "why": "Seconds to minutes and not near a whole minute: ordinary unsynchronised device clock. Not worth an alert on its own. It still cannot be trusted for ordering, so the event is sequenced on arrival time while the reported ts is preserved for the customer."
+    },
+    {
+      "cls": "clock_skew_future_ts:systematic_offset",
+      "severity": "high",
+      "ids": [
+        "evt-0006"
+      ],
+      "lines": [
+        7
+      ],
+      "detail": "received_at - ts = -3900.000s; client clock ahead by 3,900.000s (exact to the ms; 0.000s from a whole minute)",
+      "disposition": "keep ts as reported, order on received_at; flag, do not alert on a single event",
+      "why": "Minutes ahead and within seconds of a whole minute is a set offset, not drift, which is ragged. 65 minutes is not a timezone, so it is a misset clock or a code path adding an offset. Matching received_at to the millisecond is implausible for a real client, since transit always adds jitter, which points at a computed value rather than a device. One event cannot say which, or how many sources share it. In the pipeline it would be logged per source and alert only if the same offset recurs across a tenant's traffic; this script sees one sample, so it only flags it."
+    },
+    {
+      "cls": "malformed_json",
+      "severity": "high",
+      "ids": [
+        "evt-0020"
+      ],
+      "lines": [
+        21
+      ],
+      "detail": "line 21 (evt-0020): Expecting ',' delimiter: line 1 column 227 (char 226)",
+      "disposition": "quarantine to DLQ, alert, never drop silently",
+      "why": "A truncated record is the shape of partial-write or transport truncation. The count is the signal: if this rate moves, something upstream is cutting payloads."
+    },
+    {
+      "cls": "missing_received_at",
+      "severity": "high",
+      "ids": [
+        "evt-0009"
+      ],
+      "lines": [
+        10
+      ],
+      "detail": "no server arrival timestamp on the record",
+      "disposition": "stamp received_at at the edge before anything else",
+      "why": "Without a server-trusted time there is no defence against a wrong client clock and no basis for retention or deletion windows. This is the same records as the legacy SDK, which is why edge stamping cannot be optional."
+    },
+    {
+      "cls": "null_tenant_id",
+      "severity": "high",
+      "ids": [
+        "evt-0011"
+      ],
+      "lines": [
+        12
+      ],
+      "detail": "tenant_id is null",
+      "disposition": "quarantine; never assign a default tenant",
+      "why": "In a 500-tenant system an unattributed event has no safe home. Guessing a tenant is how one customer's data shows up in another customer's dashboard, which is the compliance failure that ends the contract. It also cannot be served by a deletion request, because no tenant owns it."
+    },
+    {
+      "cls": "schema_drift_legacy_sdk",
+      "severity": "high",
+      "ids": [
+        "evt-0009"
+      ],
+      "lines": [
+        10
+      ],
+      "detail": "timestamp -> ['evt-0009']; properties.page_path -> ['evt-0009']; properties.ref -> ['evt-0009']; type=pageview -> ['evt-0009']",
+      "disposition": "normalize in the pipeline; version every event; keep both shapes supported indefinitely",
+      "why": "The brief forbids requiring an SDK update, so this is not a migration state that ends. Normalization has to live in the pipeline permanently, and the legacy shape has no received_at at all, so server-side arrival time must be stamped on receipt or ordering is unrecoverable."
+    },
+    {
+      "cls": "untrusted_client_aggregate",
+      "severity": "high",
+      "ids": [
+        "evt-0019"
+      ],
+      "lines": [
+        20
+      ],
+      "detail": "properties.count_today=3 for event 'viewed_pricing'; this sample holds 1 matching page_view on /pricing across ['anon:anon-9f2', 'user:u-5511']",
+      "disposition": "never read a client-supplied count; recompute server-side from the event stream",
+      "why": "This is exactly the segment the brief asks for -- viewed pricing 3x -- arriving as a number the browser computed and we cannot audit. It disagrees with the events we actually hold. The gap may be a real client-side bug or just a sample that starts mid-session; either way a personalization rule firing on a browser's own arithmetic is a rule we cannot defend to the customer it misfires on."
+    },
+    {
+      "cls": "automated_traffic",
+      "severity": "medium",
+      "ids": [
+        "evt-0012",
+        "evt-0013",
+        "evt-0014",
+        "evt-0015"
+      ],
+      "lines": [
+        13,
+        14,
+        15,
+        16
+      ],
+      "detail": "self-identifying referrer: evt-0012 <- https://scanner.example-bot.net; evt-0013 <- https://scanner.example-bot.net; evt-0014 <- https://scanner.example-bot.net; evt-0015 <- https://scanner.example-bot.net | navigation burst: anon-8fc ['evt-0012', 'evt-0013', 'evt-0014', 'evt-0015'] in 0.064s",
+      "disposition": "label is_bot=true, exclude from billed and customer-facing metrics, retain the raw events",
+      "why": "Two independent signals agree here, which is the only reason to act: a referrer that says scanner, and four navigations in well under a second that no human produces. Delete it and we cannot show a customer why their traffic number dropped, so this is a label, not a filter at ingest."
+    },
+    {
+      "cls": "duplicate_event_id",
+      "severity": "medium",
+      "ids": [
+        "evt-0002"
+      ],
+      "lines": [
+        2,
+        5
+      ],
+      "detail": "2 copies on lines [2, 5]; payload identical=True; received_at=['2026-06-15T14:02:20.014Z', '2026-06-15T14:02:27.442Z']; kept line 2",
+      "disposition": "dedupe on event_id, keep earliest received_at",
+      "why": "Identical payload with a later arrival is at-least-once redelivery (SDK retry or ingest replay), not a second user action. Counting it as two inflates the metric the customer is watching. Payloads are compared, not assumed: differing ones are id reuse and reported separately."
+    }
+  ]
+}
